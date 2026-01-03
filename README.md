@@ -1,6 +1,5 @@
-
 <p align="center">
-  <img src="Logo.gif" width="80%" />
+  <img src="LOGO.jpg" width="80%" />
 </p>
 
 ---------------------------------------
