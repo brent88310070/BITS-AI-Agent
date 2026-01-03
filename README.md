@@ -1,5 +1,5 @@
 
- <img src="LOGO.jpg" style="align:center" />
+ <img src="LOGO.jpg" style="align:center" width="80%" />
 
 ---------------------------------------
 # BITS-AI: A RAG-Integrated AI Agent Platform for Labs
