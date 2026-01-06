@@ -38,7 +38,9 @@ python -u bitsAI_qdrant_db_admin.py
   * "Give me a quick summary of the system hardware usage."
 </details>
 
-<details> <summary>GPU Status Related question</summary><br>
+<details>
+  <summary>GPU Status Related questions</summary>
+  <br>
   * "Is there an NVIDIA GPU available?"
   * "What is the current GPU temperature? Is it overheating?"
   * "Is the GPU being utilized right now, or is it idle?"
