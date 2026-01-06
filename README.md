@@ -15,7 +15,12 @@ To access the BITS-AI agent Interface, run the main execution file:
 ```Python
 python -u bitsAI_app.py
 ```
-**Note on File Upload:**
+Three Modes of Operation:
+* **Normal**: Standard chat mode with no additional features enabled.
+* **Tools**: Enables the `開啟工具模式` toggle to call specific system utilities (see Available Tools below for details).
+* **RAG**: Enables the `開啟RAG模式` toggle to perform Retrieval-Augmented Generation based on your stored data.
+
+Note on File Upload:
 * **Default**: Uses **MarkItDown** for fast conversion.
 * **Enhanced Accuracy**: Toggle the **Marker** button for more precise results (Note: This process is slower).
 
@@ -26,7 +31,7 @@ python -u bitsAI_qdrant_db_admin.py
 ```
 
 ## Simple available Tools
-You can turn on the `工具模式已啟用` button to operate the tools:
+You can turn on the `開啟工具模式` button to operate the tools:
 <details> <summary>System Health Related question</summary>
   
   * "What is the current status of the system?"
