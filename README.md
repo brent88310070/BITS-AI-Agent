@@ -22,7 +22,8 @@ python -u bitsAI_qdrant_db_admin.py
 ```
 
 ## Simple available Tools
-<details> <summary>System Health Related question</summary><br>
+<details> <summary>System Health Related question</summary>
+  
   * "What is the current status of the system?"
   * "How much RAM is currently being used?"
   * "Is the CPU under heavy load right now?"
@@ -30,7 +31,9 @@ python -u bitsAI_qdrant_db_admin.py
   * "Give me a quick summary of the system hardware usage."
 </details>
 
-<details> <summary>System Health Related question</summary><br>
+<details> 
+<summary>System Health Related question</summary>
+
   * "What is the current status of the system?"
   * "How much RAM is currently being used?"
   * "Is the CPU under heavy load right now?"
@@ -39,22 +42,24 @@ python -u bitsAI_qdrant_db_admin.py
 </details>
 
 <details>
-<summary>🎮 GPU Status Related questions</summary>
+<summary>GPU Status Related questions</summary>
 
-* "Is there an NVIDIA GPU available?"
-* "What is the current GPU temperature? Is it overheating?"
-* "Is the GPU being utilized right now, or is it idle?"
-* "Check the load on all available graphics cards."
+  * "Is there an NVIDIA GPU available?"
+  * "What is the current GPU temperature? Is it overheating?"
+  * "Is the GPU being utilized right now, or is it idle?"
+  * "Check the load on all available graphics cards."
 </details>
 
-<details> <summary>Resource Audit Related question</summary><br>
+<details> <summary>Resource Audit Related question</summary>
+  
   * "Which processes are consuming the most CPU?"
   * "Find the top 3 memory-hogging applications."
   * "Who is running the most resource-intensive task right now?"
   * "List the top 3 scripts that are slowing down the system."
 </details>
 
-<details> <summary>Time Context Related question</summary><br>
+<details> <summary>Time Context Related question</summary>
+  
   * "What time is it now?"
   * "What day of the week is it?"
   * "Give me the current timestamp for the log."
