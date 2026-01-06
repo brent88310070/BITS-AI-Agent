@@ -18,7 +18,7 @@ python -u bitsAI_app.py
 Three Modes of Operation:
 * **Normal**: Standard chat mode with no additional features enabled.
 * **Tools**: Enables the `開啟工具模式` toggle to call specific system utilities (see Available Tools below for details).
-* **RAG**: Enables the `開啟RAG模式` toggle to perform Retrieval-Augmented Generation based on your stored data.
+* **RAG**: Enables the `開啟 RAG 模式` toggle to perform Retrieval-Augmented Generation based on your stored data.
 
 Note on File Upload:
 * **Default**: Uses **MarkItDown** for fast conversion.
@@ -30,7 +30,7 @@ You can delete the chunks or modify the metadata:
 python -u bitsAI_qdrant_db_admin.py
 ```
 
-## Simple available Tools
+## Available Tools
 You can turn on the `開啟工具模式` button to operate the tools:
 <details> <summary>System Health Related question</summary>
   
