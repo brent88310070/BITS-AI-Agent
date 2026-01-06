@@ -22,6 +22,7 @@ python -u bitsAI_qdrant_db_admin.py
 ```
 
 ## Simple available Tools
+You can turn on the `工具模式已啟用` to operate the tools
 <details> <summary>System Health Related question</summary>
   
   * "What is the current status of the system?"
