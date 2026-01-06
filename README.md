@@ -39,12 +39,12 @@ python -u bitsAI_qdrant_db_admin.py
 </details>
 
 <details>
-  <summary>GPU Status Related questions</summary>
-  <br>
-  * "Is there an NVIDIA GPU available?"
-  * "What is the current GPU temperature? Is it overheating?"
-  * "Is the GPU being utilized right now, or is it idle?"
-  * "Check the load on all available graphics cards."
+<summary>🎮 GPU Status Related questions</summary>
+
+* "Is there an NVIDIA GPU available?"
+* "What is the current GPU temperature? Is it overheating?"
+* "Is the GPU being utilized right now, or is it idle?"
+* "Check the load on all available graphics cards."
 </details>
 
 <details> <summary>Resource Audit Related question</summary><br>
