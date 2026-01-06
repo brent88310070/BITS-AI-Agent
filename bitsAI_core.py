@@ -404,6 +404,7 @@ def generate_response(message: str, current_mode: Mode) -> str:
             if not context:
                 system_prompt = "No relevant documents found. Answer based on your knowledge, but mention you couldn't find specific docs."
             else:
+                print("RAG results: ", context)
                 system_prompt = (
                     "Below is some context information from the knowledge base (in Markdown format).\n"
                     "Instructions:\n"
