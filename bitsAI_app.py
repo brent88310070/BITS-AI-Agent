@@ -5,6 +5,12 @@ import time
 from bitsAI_css import CUSTOM_CSS, JS_TOGGLE_THEME
 
 # ============================================================
+# ⚙️ 上傳限制設定
+# ============================================================
+MAX_FILE_SIZE_MB = 100       # 單一檔案最大 100MB
+MAX_FILE_COUNT = 100         # 一次上傳最大 100 個檔案
+
+# ============================================================
 # 🧠 UI 狀態管理
 # ============================================================
 current_mode = core.Mode.NORMAL
@@ -38,6 +44,27 @@ def respond_wrapper(message, chat_history):
     return "", chat_history
 
 def upload_files_handler(title, doc_type, files, use_marker):
+    # 0. 基本檢查
+    if not files:
+        return "⚠️ 請先上傳檔案。"
+
+    # 1. 檢查檔案數量限制
+    if len(files) > MAX_FILE_COUNT:
+        return f"❌ 上傳失敗：一次最多只能上傳 {MAX_FILE_COUNT} 個檔案 (您上傳了 {len(files)} 個)。"
+
+    # 2. 檢查單一檔案大小限制
+    limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    for file in files:
+        # Gradio 傳入的 file 若為物件，通常有 .name 屬性是路徑
+        file_path = file.name 
+        file_size = os.path.getsize(file_path)
+        
+        if file_size > limit_bytes:
+            file_name = os.path.basename(file_path)
+            size_mb = round(file_size / (1024 * 1024), 2)
+            return f"❌ 上傳失敗：檔案 '{file_name}' 太大 ({size_mb}MB)，超過 {MAX_FILE_SIZE_MB}MB 限制。"
+
+    # 3. 通過檢查，執行 Core 處理邏輯
     try:
         result = core.process_upload_files(title=title, doc_type=doc_type, files=files, use_marker=use_marker)
         return result
@@ -93,7 +120,10 @@ with gr.Blocks(theme=theme, css=CUSTOM_CSS, fill_width=True) as demo:
                 with gr.Group():
                     title_file = gr.Textbox(label="文檔標題", placeholder="例如：2025 研究結果")
                     file_type = gr.Dropdown(label="內容類型", choices=["people", "paper", "other"], value="other")
-                    file_input = gr.Files(label="選擇檔案")
+                    
+                    # 可以在這裡提示使用者限制
+                    file_input = gr.Files(label=f"選擇檔案 (單檔 < {MAX_FILE_SIZE_MB}MB, 最多 {MAX_FILE_COUNT} 個)")
+                    
                     use_marker_chk = gr.Checkbox(label="啟用 Marker (PDF 高精度轉換)", value=False, info="轉換速度較慢，但能更精準處理複雜 PDF 排版")
                     upload_btn = gr.Button("轉換並建立知識庫", variant="primary")
                     upload_out = gr.Markdown()
