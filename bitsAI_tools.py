@@ -1,12 +1,24 @@
+import os
+import sys
+import json
 import psutil
 import GPUtil
 import pynvml
 from datetime import datetime
-from langchain.tools import tool
-from langchain_ollama import ChatOllama
+from langchain_core.tools import tool, StructuredTool
+import asyncio
+from contextlib import AsyncExitStack
+
+# === MCP Imports ===
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+STORAGE_DIR = os.path.abspath("data_storage").replace("\\", "/")
+if not os.path.exists(STORAGE_DIR):
+    os.makedirs(STORAGE_DIR)
 
 # ============================================================
-# 🧩 工具定義
+# 🧩 本地工具定義 (保持不變)
 # ============================================================
 
 @tool("system_info")
@@ -19,7 +31,7 @@ def system_info() -> str:
 @tool("get_time")
 def get_time() -> str:
     """Current time"""
-    time = datetime.now().strftime("🕒 %Y-%m-%d (%A) %H:%M:%S")
+    time = datetime.now().strftime("🕑 %Y-%m-%d (%A) %H:%M:%S")
     print(time)
     return time
 
@@ -69,7 +81,7 @@ def resource_monitor() -> str:
                 'cpu': info['cpu_percent'],
                 'mem': info['memory_info'].rss / 1e9,
                 'script': cmdline if is_script else None,
-                'gpu_mem': 0, # 預設為 0
+                'gpu_mem': 0,
                 'gpu_id': None
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -87,11 +99,11 @@ def resource_monitor() -> str:
                 gpu_processes.append({
                     'pid': p.pid,
                     'gpu_id': i,
-                    'gpu_mem': p.usedGpuMemory / 1e9 # 轉為 GB
+                    'gpu_mem': p.usedGpuMemory / 1e9 
                 })
         pynvml.nvmlShutdown()
     except Exception:
-        pass # 若無 GPU 則跳過
+        pass 
 
     # 3. 將 GPU 數據合併回主列表
     for gp in gpu_processes:
@@ -127,18 +139,173 @@ def resource_monitor() -> str:
 
     return "\n".join(result)
 
+@tool("list_storage_files")
+def list_storage_files() -> str:
+    """
+    List filenames in the data_storage directory.
+    IMPORTANT RESTRICTION:
+    - Use this tool ONLY when the user asks "what files are there?" or "show the file list".
+    - If the user specifies a filename (e.g., "read test.csv", "get column from data.csv"), DO NOT USE THIS TOOL.
+    - Instead, use the SQL tool directly to query the file.
+    """
+    if not os.path.exists(STORAGE_DIR): return "📂 Directory empty."
+    files = os.listdir(STORAGE_DIR)
+    info = []
+    for f in files:
+        path = os.path.join(STORAGE_DIR, f)
+        size = os.path.getsize(path) / (1024*1024)
+        info.append(f"- {f} ({size:.4f} MB)")
+    return f"📂 **Files in {STORAGE_DIR}:**\n" + "\n".join(info)
+
 # ============================================================
-# ⚙️ 工具列表與 Agent 建立
+# 🌉 Tool Loader
 # ============================================================
+_mcp_exit_stack = AsyncExitStack()
 
-# 將新增的工具加入清單
-TOOLS = [system_info, get_time, gpu_info, disk_info, resource_monitor]
+async def connect_to_mcp_server(command: str, args: list[str], env: dict = None):
+    """連線到指定的 MCP Server 並回傳 tools"""
+    server_params = StdioServerParameters(
+        command=command,
+        args=args,
+        env=env
+    )
+    
+    try:
+        read_stream, write_stream = await _mcp_exit_stack.enter_async_context(stdio_client(server_params))
+        session = await _mcp_exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+        await session.initialize()
+        
+        mcp_list_tools = await session.list_tools()
+        langchain_tools = []
 
-def create_tool_agent(llm_name: str, tools: list):
-    """建立並回傳一個已綁定工具的 ChatOllama Agent"""
-    # temperature 設為 0.1 以提高工具選擇的穩定性
-    agent_tools = ChatOllama(model=llm_name, temperature=0.1).bind_tools(tools)
-    return agent_tools
+        for mcp_tool in mcp_list_tools.tools:
+            # === 💡 FIX 1: 動態注入路徑指引 ===
+            # 我們修改工具描述，強制 LLM 知道檔案都在 data_storage 資料夾下
+            # 並要求它在 SQL 查詢時使用絕對路徑或正確的相對路徑
+            enhanced_description = mcp_tool.description
+            if "sql" in mcp_tool.name.lower() or "query" in mcp_tool.name.lower():
+                enhanced_description += (
+                    f"\n\n IMPORTANT PATH INSTRUCTION \n"
+                    f"All CSV/Parquet files are located in: '{STORAGE_DIR}'\n"
+                    f"When writing SQL, you MUST prepend the path to the filename.\n"
+                    f"Example: SELECT * FROM read_csv('{STORAGE_DIR}/your_file.csv');"
+                )
 
-# 測試 Agent
-# agent = create_tool_agent("llama3.1", TOOLS)
+            # 使用閉包捕獲當前 tool 的資訊
+            def make_wrapper(tool_name, tool_session):
+                async def _tool_wrapper(**kwargs):
+                    try:
+                        if "kwargs" in kwargs and isinstance(kwargs["kwargs"], dict):
+                            actual_args = kwargs["kwargs"]
+                        else:
+                            actual_args = kwargs
+                        
+                        # === [DEBUG] 1. 印出送出的指令 ===
+                        print(f"\n📝 [MCP DEBUG] Sending to {tool_name}:")
+                        if "query" in actual_args:
+                            print(f"   👉 SQL: {actual_args['query']}")
+                        else:
+                            print(f"   👉 Args: {json.dumps(actual_args, ensure_ascii=False)}")
+                        print("-" * 50)
+                        
+                        # 執行工具
+                        result = await tool_session.call_tool(tool_name, arguments=actual_args)
+                        
+                        # === [DEBUG] 2. 印出收到的結果 (💡 新增這裡) ===
+                        print(f"📥 [MCP DEBUG] Received from {tool_name}:")
+                        if result.content:
+                            for content in result.content:
+                                if content.type == "text":
+                                    # 避免結果太長洗版，超過 500 字元就截斷顯示
+                                    display_text = content.text
+                                    if len(display_text) > 500:
+                                        display_text = display_text[:500] + "\n... [truncated] ..."
+                                    print(f"   📄 Data:\n{display_text}")
+                                else:
+                                    print(f"   📦 Object ({content.type}): {content}")
+                        else:
+                            print("   ⚠️ No content returned (Empty).")
+                        print("=" * 50 + "\n")
+                        # ==============================================
+                        
+                        output_text = []
+                        if result.content:
+                            for content in result.content:
+                                if content.type == "text":
+                                    output_text.append(content.text)
+                        
+                        # === 💡 FIX 2: 錯誤攔截與提示 (針對問題2的輔助) ===
+                        final_output = "\n".join(output_text) if output_text else "No output."
+                        
+                        # 如果 DuckDB 回傳找不到檔案的錯誤，我們在工具輸出中偷偷加一句提示
+                        # 這會刺激 LLM 自動修正，而不是只有報錯
+                        if "No such file or directory" in final_output:
+                            final_output += f"\n\n⚠️ SYSTEM HINT: The file was not found. Did you forget to add the path '{STORAGE_DIR}/'?"
+
+                        if "validation error" in final_output.lower() or "required property" in final_output.lower():
+                            final_output += (
+                                f"\n\n⚠️ SYSTEM HINT: Argument Error. "
+                                f"You MUST use the 'query' argument with a valid SQL string.\n"
+                                f"Do NOT pass 'file' or 'head' directly.\n"
+                                f"Correct Example: {{'query': \"SELECT * FROM read_csv('{STORAGE_DIR}/filename.csv') LIMIT 5\"}}"
+                            )
+                            
+                        return final_output
+
+                    except Exception as tool_err:
+                        return f"❌ Tool execution failed: {tool_err}"
+                return _tool_wrapper
+
+            lc_tool = StructuredTool.from_function(
+                func=None,
+                coroutine=make_wrapper(mcp_tool.name, session),
+                name=mcp_tool.name,
+                description=enhanced_description, # 使用修改後的描述
+            )
+            langchain_tools.append(lc_tool)
+            print(f"🔗 Loaded MCP Tool: {mcp_tool.name} (with path injection)")
+            
+        return langchain_tools
+
+    except Exception as e:
+        print(f"❌ Failed to connect to MCP server ({command}): {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+async def get_all_tools_async():
+    """非同步:載入本地工具與 DuckDB MCP 工具"""
+    
+    # 1. 基本本地工具
+    tools = [system_info, get_time, gpu_info, disk_info, resource_monitor, list_storage_files]
+    
+    # 2. MCP Server: DuckDB (MotherDuck 官方版本)
+    print("⏳ Connecting to MCP: DuckDB (MotherDuck official server)...")
+    print(f"📂 Working Directory: {STORAGE_DIR}")
+    
+    # 建立一個本地 DuckDB 資料庫路徑
+    mcp_env = os.environ.copy()
+    mcp_env["CSV_DIR"] = STORAGE_DIR  # 設定 CSV 目錄環境變數
+    
+    # MotherDuck 的 DuckDB MCP Server
+    # 功能:
+    # - 執行 SQL 查詢分析 CSV/Parquet/JSON
+    # - 使用 DuckDB 的 read_csv() 函數直接讀取檔案
+    # - 支援複雜的 SQL 分析 (JOIN, GROUP BY, 聚合函數等)
+    # - 可查詢本地檔案或 S3 遠端資料
+    mcp_tools = await connect_to_mcp_server(
+        command="uvx",
+        args=[
+            "mcp-server-motherduck",  # MotherDuck 官方 DuckDB MCP Server
+            "--db-path", ":memory:",  # 使用記憶體模式，不建立實體檔案
+        ],
+        env=mcp_env
+    )
+    
+    tools.extend(mcp_tools)
+    
+    print(f"✅ Total tools loaded: {len(tools)}")
+    print(f"💡 Tip: You can query CSV files using SQL like:")
+    print(f"   SELECT * FROM read_csv('{STORAGE_DIR}/your_file.csv') LIMIT 10;")
+    
+    return tools

@@ -21,7 +21,8 @@ from langchain_community.document_loaders import TextLoader
 
 from markitdown import MarkItDown
 
-from bitsAI_tools import TOOLS, create_tool_agent
+from bitsAI_tools import get_all_tools_async, list_storage_files
+import asyncio
 
 # ============================================================
 # ⚙️ 全域設定與 Enum
@@ -42,17 +43,52 @@ class Mode(Enum):
 # ============================================================
 # 🤖 Agent 初始化
 # ============================================================
-# General Agent
+# General Agent (不需工具)
 agent_general = ChatOllama(model=LLM_NAME, temperature=0.1)
 
-# 工具 Agent
-agent_tools = create_tool_agent(LLM_NAME, TOOLS)
-
-# RAG 專用 LLM
+# RAG & Summarizer LLMs
 rag_llm = ChatOllama(model=LLM_NAME, temperature=0.1)
-
-# 摘要專用 LLM
 summarizer_llm = ChatOllama(model=SUMMARIZER_LLM_NAME, temperature=0.1)
+
+# Tool Agent 需要等待 MCP 連線，所以我們延遲初始化，或者在此處 block 等待
+print("⏳ Connecting to Local MCP Servers...")
+
+# 建立一個全域的 Event Loop 來管理 MCP 連線
+# 注意：如果在 Jupyter Notebook 中，請勿使用 new_event_loop，改用 get_event_loop
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+try:
+    loaded_tools = loop.run_until_complete(get_all_tools_async())
+except Exception as e:
+    print(f"❌ Tool loading failed: {e}")
+    loaded_tools = [list_storage_files] # Fallback
+
+print(f"✅ Total Tools Loaded: {len(loaded_tools)}")
+
+# 綁定工具到 LLM
+agent_tools = ChatOllama(model=LLM_NAME, temperature=0.1).bind_tools(loaded_tools)
+
+# 建立 Mapping
+TOOL_MAPPING = {t.name: t for t in loaded_tools}
+base_path = os.path.abspath('data_storage').replace('\\', '/')
+TOOL_SYSTEM_PROMPT = TOOL_SYSTEM_PROMPT = f"""
+You are a Data Analysis Assistant with access to local tools.
+
+CRITICAL RULES:
+1. **Absolute Paths**: All data is in `{base_path}`.
+   - You MUST use the full path in SQL. Example: `SELECT * FROM read_csv('{base_path}/file.csv')`
+
+2. **Error Handling**:
+   - On error (e.g., "File not found"), analyze and **RETRY immediately** with a corrected path.
+   - Max 3 attempts before reporting failure.
+
+3. **NO HALLUCINATIONS (CRITICAL)**:
+   - **NEVER invent or guess data.**
+   - If the user asks for rows, top N records, or specific values, you **MUST** execute a `sql_query` to get the actual data.
+   - If you haven't run a tool, you do not know the answer.
+   - Do NOT generate a fake CSV table.
+"""
 
 # ============================================================
 # 🧠 Summarized Short-Term Memory 實作
@@ -421,33 +457,93 @@ def generate_response(message: str, current_mode: Mode) -> str:
 
         # 2. 處理 Tools Mode
         elif current_mode == Mode.TOOLS:
-            print("🛠️ Mode: TOOLS")
-            tool_input_msg = message
-            if memory.summary:
-                tool_input_msg = f"Context: {memory.summary}\nUser Request: {message}"
-
-            res = agent_tools.invoke([{"role": "user", "content": tool_input_msg}])
+            print("🛠️ Mode: TOOLS (Auto-Retry Enabled)")
             
-            calls = getattr(res, "tool_calls", [])
-            if calls:
-                call = calls[0]
+            # 準備初始訊息
+            # 我們加入 TOOL_SYSTEM_PROMPT 讓它一開始就知道路徑規則
+            msgs = [SystemMessage(content=TOOL_SYSTEM_PROMPT)]
+            
+            # 加入對話歷史摘要 (如果有的話)
+            if memory.summary:
+                msgs.append(SystemMessage(content=f"Context Summary: {memory.summary}"))
+            
+            # 加入使用者最新的問題
+            msgs.append(HumanMessage(content=message))
+
+            max_retries = 3
+            final_tool_output = None
+            
+            for attempt in range(max_retries):
+                print(f"🔄 Attempt {attempt + 1}/{max_retries}")
+                
+                # 呼叫 Agent
+                res = agent_tools.invoke(msgs)
+                msgs.append(res) # 將 AI 的回應 (包含 Tool Call) 加入歷史
+                
+                calls = getattr(res, "tool_calls", [])
+                
+                # 如果 AI 決定不呼叫工具，直接結束迴圈
+                if not calls:
+                    final_response = res.content
+                    break
+                
+                # 處理工具呼叫
+                call = calls[0] # 目前假設一次呼叫一個工具
                 name = call["name"]
                 args = call.get("args", call.get("arguments", {}))
                 
-                tool = next((t for t in TOOLS if t.name == name), None)
+                print(f"🔧 Invoking Tool: {name}")
+                
+                tool = TOOL_MAPPING.get(name)
+                tool_result = ""
+                
                 if not tool:
-                    final_response = f"⚠️ Tool not found: {name}"
+                    tool_result = f"❌ Error: Tool '{name}' not found."
                 else:
-                    tool_result = tool.invoke(args)
-                    followup = f"Tool '{name}' output: {tool_result}. Now answer the user: {message}"
+                    try:
+                        if tool.coroutine:
+                            tool_result = loop.run_until_complete(tool.coroutine(**args))
+                        else:
+                            tool_result = tool.invoke(args)
+                    except Exception as e:
+                        tool_result = f"❌ Error executing tool: {e}"
+
+                # 將工具結果轉為 ToolMessage 加入歷史
+                # 注意：LangChain 需要正確的 tool_call_id (這裡簡化處理，Ollama 通常不強制)
+                from langchain_core.messages import ToolMessage
+                tool_msg = ToolMessage(content=str(tool_result), tool_call_id=call.get("id", "call_default"))
+                msgs.append(tool_msg)
+                
+                # 🔍 判斷是否需要重試
+                # 檢查 bitsAI_tools.py 裡我們設下的 "SYSTEM HINT" 或常見錯誤關鍵字
+                result_lower = str(tool_result).lower()
+                is_error = (
+                    "system hint" in result_lower or 
+                    "error" in result_lower or 
+                    "exception" in result_lower or 
+                    "failed" in result_lower or
+                    "required property" in result_lower # 針對這次的錯誤
+                )
+                
+                if is_error and attempt < max_retries - 1:
+                    print(f"⚠️ Detected Error in Tool Output. Retrying... \nError snippet: {str(tool_result)[:100]}...")
+                    continue
+                else:
+                    # 成功，或者重試次數用盡 -> 生成最終回覆給使用者
+                    print("✅ Tool execution successful or retries exhausted.")
                     
-                    msgs = memory.get_messages(system_instruction="You are a helpful assistant with tool access.")
-                    msgs.append(HumanMessage(content=followup))
+                    # 💡 FIX: 修改這裡的 Prompt，強制它忠實呈現工具結果
+                    final_prompt = (
+                        "Based strictly on the tool outputs above, answer the user's question.\n"
+                        "If the tool output contains data rows, present them exactly as they are.\n"
+                        "Do not make up any data that is not in the tool output."
+                    )
                     
-                    final = agent_general.invoke(msgs)
-                    final_response = final.content
-            else:
-                final_response = getattr(res, "content", "") or "(Tool Agent 無回應)"
+                    msgs.append(HumanMessage(content=final_prompt))
+                    
+                    final_res = agent_general.invoke(msgs)
+                    final_response = final_res.content
+                    break
 
         # 3. 處理 Normal Mode
         else: # Mode.NORMAL

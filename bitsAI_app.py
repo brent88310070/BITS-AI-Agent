@@ -1,14 +1,19 @@
 import gradio as gr
 import os
+import shutil
 import bitsAI_core as core
 import time
 from bitsAI_css import CUSTOM_CSS, JS_TOGGLE_THEME
 
 # ============================================================
-# ⚙️ 上傳限制設定
+# ⚙️ 上傳限制與路徑設定
 # ============================================================
 MAX_FILE_SIZE_MB = 100       # 單一檔案最大 100MB
 MAX_FILE_COUNT = 100         # 一次上傳最大 100 個檔案
+STORAGE_DIR = "data_storage" # VisiData 專用資料夾
+
+# 確保資料夾存在
+os.makedirs(STORAGE_DIR, exist_ok=True)
 
 # ============================================================
 # 🧠 UI 狀態管理
@@ -33,6 +38,63 @@ def set_mode(new_mode):
     return update_ui_state()
 
 # ============================================================
+# 📂 檔案處理邏輯
+# ============================================================
+
+def validate_files(files):
+    """共用的檔案檢查邏輯"""
+    if not files:
+        return False, "⚠️ 請先選擇檔案。"
+    
+    if len(files) > MAX_FILE_COUNT:
+        return False, f"❌ 上傳失敗：一次最多只能上傳 {MAX_FILE_COUNT} 個檔案。"
+
+    limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    for file in files:
+        file_path = file.name 
+        if os.path.getsize(file_path) > limit_bytes:
+            return False, f"❌ 上傳失敗：檔案 '{os.path.basename(file_path)}' 超過 {MAX_FILE_SIZE_MB}MB。"
+            
+    return True, ""
+
+def rag_upload_handler(title, doc_type, files, use_marker):
+    """處理 RAG 知識庫上傳 (透過 Core 處理)"""
+    is_valid, msg = validate_files(files)
+    if not is_valid:
+        return msg
+
+    try:
+        # 呼叫 Core 進行向量化
+        result = core.process_upload_files(title=title, doc_type=doc_type, files=files, use_marker=use_marker)
+        return result
+    except Exception as e:
+        return f"❌ RAG 處理失敗: {str(e)}"
+
+def storage_upload_handler(files):
+    """處理數據中心上傳 (僅儲存到 data_storage)"""
+    is_valid, msg = validate_files(files)
+    if not is_valid:
+        return msg
+
+    saved_count = 0
+    logs = []
+    
+    try:
+        for file in files:
+            filename = os.path.basename(file.name)
+            # 處理檔名重複或直接覆蓋 (這邊選擇直接覆蓋)
+            dest_path = os.path.join(STORAGE_DIR, filename)
+            
+            # 從 Gradio Temp 複製到 data_storage
+            shutil.copy(file.name, dest_path)
+            saved_count += 1
+            logs.append(f"📄 {filename}")
+            
+        return f"✅ 已儲存 {saved_count} 個檔案至 '{STORAGE_DIR}'：\n" + "\n".join(logs)
+    except Exception as e:
+        return f"❌ 儲存失敗: {str(e)}"
+
+# ============================================================
 # 💬 對話包裝函式
 # ============================================================
 def respond_wrapper(message, chat_history):
@@ -43,36 +105,8 @@ def respond_wrapper(message, chat_history):
     chat_history.append((message, response_text))
     return "", chat_history
 
-def upload_files_handler(title, doc_type, files, use_marker):
-    # 0. 基本檢查
-    if not files:
-        return "⚠️ 請先上傳檔案。"
-
-    # 1. 檢查檔案數量限制
-    if len(files) > MAX_FILE_COUNT:
-        return f"❌ 上傳失敗：一次最多只能上傳 {MAX_FILE_COUNT} 個檔案 (您上傳了 {len(files)} 個)。"
-
-    # 2. 檢查單一檔案大小限制
-    limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-    for file in files:
-        # Gradio 傳入的 file 若為物件，通常有 .name 屬性是路徑
-        file_path = file.name 
-        file_size = os.path.getsize(file_path)
-        
-        if file_size > limit_bytes:
-            file_name = os.path.basename(file_path)
-            size_mb = round(file_size / (1024 * 1024), 2)
-            return f"❌ 上傳失敗：檔案 '{file_name}' 太大 ({size_mb}MB)，超過 {MAX_FILE_SIZE_MB}MB 限制。"
-
-    # 3. 通過檢查，執行 Core 處理邏輯
-    try:
-        result = core.process_upload_files(title=title, doc_type=doc_type, files=files, use_marker=use_marker)
-        return result
-    except Exception as e:
-        return f"❌ 處理失敗: {str(e)}"
-
 # ============================================================
-# 🎨 Gradio Layout (App Structure)
+# 🎨 Gradio Layout
 # ============================================================
 
 theme = gr.themes.Soft(
@@ -90,18 +124,16 @@ with gr.Blocks(theme=theme, css=CUSTOM_CSS, fill_width=True) as demo:
     </div>
     """)
 
-    # 這裡的 equal_height=False 很重要，讓內容自然堆疊
     with gr.Row(equal_height=False, elem_classes=["main-row"]):
         
         # --- 左側控制欄 ---
         with gr.Column(scale=1, min_width=300, elem_classes="sidebar-container"):
             
-            # [修改點] 這裡加上了 "first-card" class，配合 CSS 強制頂部對齊
+            # 卡片 1: 模式切換 (保持在最上方)
             with gr.Column(elem_classes=["sidebar-card", "first-card"]):
                 with gr.Row(elem_classes=["header-row"]):
                     with gr.Column(scale=1, min_width=0): 
                         gr.Markdown("### 模式切換")
-                    
                     with gr.Column(scale=0, min_width=60):
                         theme_btn = gr.Button(value="", elem_classes=["theme-switch-btn"])
 
@@ -109,36 +141,61 @@ with gr.Blocks(theme=theme, css=CUSTOM_CSS, fill_width=True) as demo:
                     toggle_tool_btn = gr.Button(LABELS[current_mode][0], variant="secondary")
                     toggle_rag_btn = gr.Button(LABELS[current_mode][1], variant="secondary")
             
+            # 卡片 2: 檔案管理 (使用 Tabs 解決空間問題)
+            with gr.Column(elem_classes="sidebar-card"):
+                
+                # 使用 Tabs 分流不同上傳目的
+                with gr.Tabs():
+                    
+                    # --- Tab 1: RAG 知識庫 ---
+                    with gr.TabItem("建立知識庫"):
+                        with gr.Group():
+                            title_file = gr.Textbox(label="文檔標題", placeholder="例如：2025 研究結果")
+                            file_type = gr.Dropdown(label="內容類型", choices=["people", "paper", "other"], value="other")
+                            rag_file_input = gr.Files(label="選擇文件 (PDF/MD/TXT)")
+                            use_marker_chk = gr.Checkbox(label="啟用 Marker (PDF 高精度)", value=False)
+                            
+                            rag_upload_btn = gr.Button("轉換並建立知識庫", variant="primary")
+                            rag_upload_out = gr.Markdown()
+
+                    # --- Tab 2: 數據中心 (VisiData) ---
+                    with gr.TabItem("表格資料中心"):
+                        with gr.Group():
+                            data_file_input = gr.Files(label="選擇資料")
+                            
+                            data_upload_btn = gr.Button("上傳至表格資料中心", variant="primary")
+                            data_upload_out = gr.Markdown()
+
             # --- 事件綁定 ---
             theme_btn.click(None, None, None, js=JS_TOGGLE_THEME)
             toggle_tool_btn.click(lambda: set_mode(core.Mode.TOOLS), None, [toggle_tool_btn, toggle_rag_btn])
             toggle_rag_btn.click(lambda: set_mode(core.Mode.RAG), None, [toggle_tool_btn, toggle_rag_btn])
 
-            # --- 知識庫 ---
-            with gr.Column(elem_classes="sidebar-card"):
-                gr.Markdown("### 知識庫管理")
-                with gr.Group():
-                    title_file = gr.Textbox(label="文檔標題", placeholder="例如：2025 研究結果")
-                    file_type = gr.Dropdown(label="內容類型", choices=["people", "paper", "other"], value="other")
-                    
-                    # 可以在這裡提示使用者限制
-                    file_input = gr.Files(label=f"選擇檔案 (單檔 < {MAX_FILE_SIZE_MB}MB, 最多 {MAX_FILE_COUNT} 個)")
-                    
-                    use_marker_chk = gr.Checkbox(label="啟用 Marker (PDF 高精度轉換)", value=False, info="轉換速度較慢，但能更精準處理複雜 PDF 排版")
-                    upload_btn = gr.Button("轉換並建立知識庫", variant="primary")
-                    upload_out = gr.Markdown()
+            # RAG 上傳事件
+            rag_upload_btn.click(
+                fn=lambda: (gr.update(interactive=False, value="⏳ 轉換中..."), "⏳ 轉換中..."),
+                outputs=[rag_upload_btn, rag_upload_out]
+            ).then(
+                fn=rag_upload_handler,
+                inputs=[title_file, file_type, rag_file_input, use_marker_chk], 
+                outputs=rag_upload_out
+            ).then(
+                fn=lambda: gr.update(interactive=True, value="轉換並建立知識庫"),
+                outputs=[rag_upload_btn]
+            )
 
-                    upload_btn.click(
-                        fn=lambda: (gr.update(interactive=False, value="⏳ 轉換中，請稍候..."), "⏳ 轉換中，請稍候..."),
-                        outputs=[upload_btn, upload_out]
-                    ).then(
-                        fn=upload_files_handler,
-                        inputs=[title_file, file_type, file_input, use_marker_chk], 
-                        outputs=upload_out
-                    ).then(
-                        fn=lambda: gr.update(interactive=True, value="儲存至知識庫"),
-                        outputs=[upload_btn]
-                    )
+            # Data Storage 上傳事件
+            data_upload_btn.click(
+                fn=lambda: (gr.update(interactive=False, value="⏳ 上傳中..."), "⏳ 上傳中..."),
+                outputs=[data_upload_btn, data_upload_out]
+            ).then(
+                fn=storage_upload_handler,
+                inputs=[data_file_input],
+                outputs=data_upload_out
+            ).then(
+                fn=lambda: gr.update(interactive=True, value="上傳至數據中心"),
+                outputs=[data_upload_btn]
+            )
 
         # --- 右側聊天欄 ---
         with gr.Column(scale=4, elem_classes="chatbot-column"):
